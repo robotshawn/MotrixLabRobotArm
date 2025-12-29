@@ -329,7 +329,7 @@ def compute_target_progress_before_drop(
     target_progress_reward_before_drop = np.where(
         use_min_dist,
         target_progress_reward_min_dist,
-        target_progress_reward_potential,
+        target_progress_reward_min_dist,
     ).astype(np.float32)
 
     return {
