@@ -425,12 +425,6 @@ class PandaPickPlaceTask(NpEnv):
         reach_grasp_transport_progress_ledger = np.zeros((number_of_resets,), dtype=np.float32)
 
         reach_grasp_transport_has_dropped_after_lift = np.zeros((number_of_resets,), dtype=bool)
-        reach_grasp_transport_drop_box_to_target_distance_3d_snapshot = box_to_target_distance_3d.copy().astype(np.float32)
-        reach_grasp_transport_drop_quality_weight = (np.ones((number_of_resets,), dtype=np.float32) * 1.5)
-
-        reach_grasp_transport_lift_success_box_to_target_distance_3d_snapshot = box_to_target_distance_3d.copy().astype(np.float32)
-        reach_grasp_transport_target_progress_distance_scale = (np.ones((number_of_resets,), dtype=np.float32) * 0.30)
-        reach_grasp_transport_best_target_progress_score = np.zeros((number_of_resets,), dtype=np.float32)
 
         info = {
             "current_actions": np.zeros((number_of_resets, self._model.num_actuators), dtype=np.float32),
@@ -481,17 +475,8 @@ class PandaPickPlaceTask(NpEnv):
             "reach_grasp_transport_best_grasp_approach_score": reach_grasp_transport_best_grasp_approach_score,
             "reach_grasp_transport_best_lift_score": reach_grasp_transport_best_lift_score,
 
-            # （保留但目前不使用）
-            "reach_grasp_transport_best_transport_xy_score": np.zeros((number_of_resets,), dtype=np.float32),
-            "reach_grasp_transport_best_pre_drop_score": np.zeros((number_of_resets,), dtype=np.float32),
-
             # lift -> drop -> home
             "reach_grasp_transport_has_dropped_after_lift": reach_grasp_transport_has_dropped_after_lift,
-            "reach_grasp_transport_drop_box_to_target_distance_3d_snapshot": reach_grasp_transport_drop_box_to_target_distance_3d_snapshot,
-            "reach_grasp_transport_drop_quality_weight": reach_grasp_transport_drop_quality_weight,
-            "reach_grasp_transport_lift_success_box_to_target_distance_3d_snapshot": reach_grasp_transport_lift_success_box_to_target_distance_3d_snapshot,
-            "reach_grasp_transport_target_progress_distance_scale": reach_grasp_transport_target_progress_distance_scale,
-            "reach_grasp_transport_best_target_progress_score": reach_grasp_transport_best_target_progress_score,
 
             "reach_grasp_transport_best_end_effector_to_home_distance": reach_grasp_transport_best_end_effector_to_home_distance,
             "reach_grasp_transport_idle_steps_counter": reach_grasp_transport_idle_steps_counter,
