@@ -1,4 +1,6 @@
-（目前，已经实现pick-place-home全部过程的是基于"whole process success i think"这个提交，而后面的提交是我继续再这个基础上做的一些修改，还有待继续验证和跟进）
+（目前，已经实现pick-place-home全部过程的是基于"whole process success i think"（git）这个提交，而后面的提交是我继续再这个基础上做的一些修改，还有待继续验证和跟进）
+[Screencast from 12-31-2025 12:52:39 AM.webm](https://github.com/user-attachments/assets/11f08dcf-c2f0-4d10-9abf-c6ebbe6a2eb0)
+
 首先我自己回忆一下，经历过：
 刚开始的各种shaping堆叠，
 到后面改为gating的方式（但是设计的不够好），
