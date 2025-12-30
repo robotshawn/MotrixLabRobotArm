@@ -8,18 +8,6 @@ def _get_float_config_value(reward_configuration, key: str, default: float, old_
     return float(getattr(reward_configuration, key, getattr(reward_configuration, old_key, default)))
 
 
-def _clip_to_unit_interval(x: np.ndarray) -> np.ndarray:
-    return np.clip(np.asarray(x, dtype=np.float32), 0.0, 1.0).astype(np.float32)
-
-
-def _score_near_distance(distance_value: np.ndarray, distance_scale, eps: float = 1e-6) -> np.ndarray:
-    """score_near(distance; scale) = clip01(1 - distance / scale) ; scale can be float or (N,) array"""
-    distance_value = np.asarray(distance_value, dtype=np.float32)
-    distance_scale = np.asarray(distance_scale, dtype=np.float32)
-    distance_scale = np.clip(distance_scale, eps, None)
-    return _clip_to_unit_interval(1.0 - distance_value / distance_scale)
-
-
 def _load_info_array(info: dict, key: str, fallback: np.ndarray, dtype, number_of_environments: int) -> np.ndarray:
     """Load 1D array from info with shape fallback."""
     v = info.get(key, fallback)
@@ -76,63 +64,12 @@ def compute_target_progress_before_drop(
     lift 成功后 & drop 前：
       - 使用 fingertip_center -> target 的 3D 距离
       - ✅ 仅保留 min-distance progress：只奖励刷新历史最小距离（节省计算资源）
+      - ✅ 删除仅用于监测/可视化的 score/scale/snapshot/best_score 等项
     """
     reset_episode = np.asarray(reset_episode, dtype=bool)
     lift_success_just_achieved = np.asarray(lift_success_just_achieved, dtype=bool)
     post_lift_before_drop_mask = np.asarray(post_lift_before_drop_mask, dtype=bool)
     fingertip_center_to_target_distance_3d = np.asarray(fingertip_center_to_target_distance_3d, dtype=np.float32)
-
-    # --- snapshot at lift success (for scale) ---
-    lift_success_ftcenter_target_snapshot_previous = np.asarray(
-        info.get(
-            "reach_grasp_transport_lift_success_ftcenter_to_target_distance_3d_snapshot",
-            fingertip_center_to_target_distance_3d.copy(),
-        ),
-        dtype=np.float32,
-    )
-    if lift_success_ftcenter_target_snapshot_previous.shape[0] != number_of_environments:
-        lift_success_ftcenter_target_snapshot_previous = fingertip_center_to_target_distance_3d.copy().astype(np.float32)
-    lift_success_ftcenter_target_snapshot_previous = np.where(
-        reset_episode,
-        fingertip_center_to_target_distance_3d,
-        lift_success_ftcenter_target_snapshot_previous,
-    ).astype(np.float32)
-
-    lift_success_ftcenter_target_snapshot_current = np.where(
-        lift_success_just_achieved,
-        fingertip_center_to_target_distance_3d,
-        lift_success_ftcenter_target_snapshot_previous,
-    ).astype(np.float32)
-
-    target_progress_distance_scale_previous = np.asarray(
-        info.get(
-            "reach_grasp_transport_target_progress_distance_scale",
-            np.ones(number_of_environments, dtype=np.float32) * 0.30,
-        ),
-        dtype=np.float32,
-    )
-    if target_progress_distance_scale_previous.shape[0] != number_of_environments:
-        target_progress_distance_scale_previous = np.ones((number_of_environments,), dtype=np.float32) * 0.30
-
-    target_distance_scale_alpha = _get_float_config_value(reward_configuration, "rg3_m_t_alpha_rwdfunc", 0.9, old_key="rg3_m_xy_alpha_rwdfunc")
-    target_distance_scale_minimum = _get_float_config_value(reward_configuration, "rg3_m_t_min_rwdfunc", 0.08, old_key="rg3_m_xy_min_rwdfunc")
-    target_distance_scale_maximum = _get_float_config_value(reward_configuration, "rg3_m_t_max_rwdfunc", 0.45, old_key="rg3_m_xy_max_rwdfunc")
-
-    target_progress_distance_scale_current = np.where(
-        lift_success_just_achieved,
-        np.clip(
-            target_distance_scale_alpha * lift_success_ftcenter_target_snapshot_current,
-            target_distance_scale_minimum,
-            target_distance_scale_maximum,
-        ).astype(np.float32),
-        target_progress_distance_scale_previous,
-    ).astype(np.float32)
-
-    # --- score (for debug / best logging, still kept) ---
-    target_progress_score = _score_near_distance(
-        fingertip_center_to_target_distance_3d,
-        target_progress_distance_scale_current,
-    )
 
     # ------------------------------------------------------------------
     # min-distance progress state
@@ -151,31 +88,6 @@ def compute_target_progress_before_drop(
     target_distance_best_improvement = np.maximum(
         0.0,
         (best_target_distance_previous - best_target_distance_current - float(max(min_dist_delta, 0.0))),
-    ).astype(np.float32)
-
-    best_target_progress_score_previous = np.asarray(
-        info.get("reach_grasp_transport_best_target_progress_score", np.zeros(number_of_environments, dtype=np.float32)),
-        dtype=np.float32,
-    )
-    if best_target_progress_score_previous.shape[0] != number_of_environments:
-        best_target_progress_score_previous = np.zeros((number_of_environments,), dtype=np.float32)
-    best_target_progress_score_previous = np.where(
-        reset_episode | lift_success_just_achieved,
-        0.0,
-        best_target_progress_score_previous,
-    ).astype(np.float32)
-
-    best_target_progress_score_current = np.where(
-        post_lift_before_drop_mask,
-        np.maximum(best_target_progress_score_previous, target_progress_score),
-        best_target_progress_score_previous,
-    ).astype(np.float32)
-
-    # 保留 best improvement（仅 debug）
-    minimum_target_progress_delta = _get_float_config_value(reward_configuration, "rg3_delta_t3_rwdfunc", 1e-4)
-    target_progress_best_improvement = np.maximum(
-        0.0,
-        (best_target_progress_score_current - best_target_progress_score_previous - float(max(minimum_target_progress_delta, 0.0))),
     ).astype(np.float32)
 
     # --- min-distance progress reward ---
@@ -199,18 +111,7 @@ def compute_target_progress_before_drop(
 
     return {
         "target_progress_reward_before_drop": target_progress_reward_before_drop,
-        "best_target_progress_score_current": best_target_progress_score_current,
-        "target_progress_distance_scale_current": target_progress_distance_scale_current,
-        "lift_success_ftcenter_target_snapshot_current": lift_success_ftcenter_target_snapshot_current,
-        "target_progress_score": target_progress_score,
-        "target_progress_best_improvement": target_progress_best_improvement,
-
-        # min-distance progress debug/state
-        "best_target_distance_previous": best_target_distance_previous,
         "best_target_distance_current": best_target_distance_current,
-        "target_distance_best_improvement": target_distance_best_improvement,
-        "target_progress_reward_min_dist(debug)": target_progress_reward_min_dist,
-        "target_progress_reward_mode_is_min_dist": (np.ones((number_of_environments,), dtype=np.float32) * 1.0).astype(np.float32),
     }
 
 
@@ -225,14 +126,12 @@ def compute_home_progress_after_drop(
     has_dropped_after_lift_just_now: np.ndarray,
     home_progress_active_mask: np.ndarray,
     end_effector_to_home_distance: np.ndarray,
-    box_position_world: np.ndarray,
-    target_position_world: np.ndarray,
-    fingertip_center_position_world: np.ndarray,
 ) -> dict:
     """
     drop 后的 home progress：
       - 仅当 home_progress_active_mask=True（由上层 gating 决定）才启用
       - ✅ 仅保留 min-distance progress：只奖励刷新历史最小距离（节省计算资源）
+      - ✅ 删除仅用于监测/可视化的中间项返回
     """
     reset_episode = np.asarray(reset_episode, dtype=bool)
     lift_success_just_achieved = np.asarray(lift_success_just_achieved, dtype=bool)
@@ -245,7 +144,7 @@ def compute_home_progress_after_drop(
     home_phase_start = (has_dropped_after_lift_just_now & home_progress_active_mask).astype(bool)
 
     # -------------------------
-    # best(min-distance) state（min-dist progress 必要状态；也可 debug）
+    # best(min-distance) state（min-dist progress 必要状态）
     # -------------------------
     best_home_distance_previous, best_home_distance_current = _update_best_min_distance_state(
         info=info,
@@ -291,9 +190,6 @@ def compute_home_progress_after_drop(
         home_progress_reward = np.clip(home_progress_reward, -cap, cap).astype(np.float32)
 
     return {
-        "best_home_distance_previous": best_home_distance_previous,
         "best_home_distance_current": best_home_distance_current,
-        "home_distance_best_improvement": home_distance_best_improvement,
         "home_progress_reward": home_progress_reward,
-        "home_progress_reward_mode_is_min_dist": (np.ones((number_of_environments,), dtype=np.float32) * 1.0).astype(np.float32),
     }

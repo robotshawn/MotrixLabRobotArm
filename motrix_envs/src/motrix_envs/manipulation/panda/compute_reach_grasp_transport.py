@@ -650,15 +650,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         fingertip_center_to_target_distance_3d=fingertip_center_to_target_distance_3d,
     )
     target_progress_reward_before_drop = target_out["target_progress_reward_before_drop"].astype(np.float32)
-    best_target_progress_score_current = target_out["best_target_progress_score_current"].astype(np.float32)
-    target_progress_distance_scale_current = target_out["target_progress_distance_scale_current"].astype(np.float32)
-    lift_success_ftcenter_target_snapshot_current = target_out["lift_success_ftcenter_target_snapshot_current"].astype(np.float32)
-    target_progress_score = target_out["target_progress_score"].astype(np.float32)
-    target_progress_best_improvement = target_out["target_progress_best_improvement"].astype(np.float32)
-
-    best_target_distance_current = target_out.get("best_target_distance_current", None)
-    if best_target_distance_current is not None:
-        best_target_distance_current = np.asarray(best_target_distance_current, dtype=np.float32)
+    best_target_distance_current = target_out["best_target_distance_current"].astype(np.float32)
 
     # ======================================================================
     # ✅ drop 后：home reward 只在 home_reward_armed_current=True 时启用
@@ -675,13 +667,8 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         has_dropped_after_lift_just_now=has_dropped_after_lift_just_now,
         home_progress_active_mask=home_progress_active_mask,
         end_effector_to_home_distance=end_effector_to_home_distance,
-        box_position_world=box_position_world,
-        target_position_world=target_position_world,
-        fingertip_center_position_world=fingertip_center_position_world,
     )
-    best_home_distance_previous = home_out["best_home_distance_previous"].astype(np.float32)
     best_home_distance_current = home_out["best_home_distance_current"].astype(np.float32)
-    home_distance_best_improvement = home_out["home_distance_best_improvement"].astype(np.float32)
     home_progress_reward = home_out["home_progress_reward"].astype(np.float32)
 
     # ✅ progress reward（用于 idle/progress ledger 判定）
@@ -774,21 +761,14 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     success_just_achieved = (success_mask & (~task_success_achieved_previous)).astype(bool)
 
     # ======================================================================
-    # ✅ NEW DESIGN #2 (REQUESTED BY USER):
-    # 到达 home 区域后，根据 cube 此刻到 target 的 xy 距离给一次性奖励（越小越大）
+    # ✅ SUCCESS REWARD (REQUESTED):
+    # 去掉 home 成功后按 cube-target XY 距离计算的奖励，只保留一次性大额成功奖励
     # ======================================================================
-    box_to_target_xy_distance = np.linalg.norm(
-        box_position_world[:, :2].astype(np.float32) - target_position_world[:, :2].astype(np.float32),
-        axis=1,
-    ).astype(np.float32)
-
-    home_xy_bonus_scale = _get_float_config_value(reward_configuration, "rg3_home_xy_bonus_scale_rwdfunc", 0.15)
-    home_xy_bonus_value = _get_float_config_value(reward_configuration, "rg3_R_home_xy_bonus_rwdfunc", 10.0)
-    home_xy_score = _score_near_distance(box_to_target_xy_distance, home_xy_bonus_scale).astype(np.float32)
-    home_xy_bonus_reward = (home_xy_bonus_value * home_xy_score * success_just_achieved.astype(np.float32)).astype(np.float32)
+    task_success_bonus_value = _get_float_config_value(reward_configuration, "rg3_R_task_success_bonus_rwdfunc", 50.0)
+    task_success_bonus_reward = (float(task_success_bonus_value) * success_just_achieved.astype(np.float32)).astype(np.float32)
 
     # ✅ extra reward（不参与 idle/progress ledger，避免刷分）
-    extra_reward = (drop_box_stability_reward + post_drop_move_stability_reward + post_drop_away_reward + home_xy_bonus_reward).astype(np.float32)
+    extra_reward = (drop_box_stability_reward + post_drop_move_stability_reward + post_drop_away_reward + task_success_bonus_reward).astype(np.float32)
 
     total_reward = (positive_progress_reward + extra_reward - settlement_penalty - stall_penalty - timeout_penalty + safety_penalty).astype(np.float32)
 
@@ -854,13 +834,8 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     # ✅ NEW: home reward gating latch
     info["reach_grasp_transport_home_reward_armed"] = home_reward_armed_current.astype(bool)
 
-    info["reach_grasp_transport_lift_success_ftcenter_to_target_distance_3d_snapshot"] = lift_success_ftcenter_target_snapshot_current.astype(np.float32)
-    info["reach_grasp_transport_target_progress_distance_scale"] = target_progress_distance_scale_current.astype(np.float32)
-    info["reach_grasp_transport_best_target_progress_score"] = best_target_progress_score_current.astype(np.float32)
-
-    # ✅ NEW: min-distance progress state（用于奖励）
-    if best_target_distance_current is not None:
-        info["reach_grasp_transport_best_target_distance_3d"] = best_target_distance_current.astype(np.float32)
+    # ✅ min-distance progress state（用于奖励）
+    info["reach_grasp_transport_best_target_distance_3d"] = best_target_distance_current.astype(np.float32)
 
     info["reach_grasp_transport_best_end_effector_to_home_distance"] = best_home_distance_current.astype(np.float32)
 
@@ -869,116 +844,29 @@ def _compute_reward_reach_grasp_transport(env, data, info):
 
     info["reach_grasp_transport_previous_attempt_failed"] = attempt_failed_event_mask.astype(bool)
 
+    # 仅保留参与 reward/termination 设计的项；去掉纯 TensorBoard 监测用 debug 项
     reward_terms = {
-        "grasp_approach_best_improvement": grasp_approach_best_improvement.astype(np.float32),
-        "lift_best_improvement": lift_best_improvement.astype(np.float32),
         "pre_lift_progress_reward": pre_lift_progress_reward.astype(np.float32),
         "lift_slow_reward": lift_slow_reward.astype(np.float32),
-
-        # ✅ NEW: lift 一次性大额奖励
         "lift_success_bonus_reward": lift_success_bonus_reward.astype(np.float32),
-
-        "post_lift_before_drop_mask": post_lift_before_drop_mask.astype(np.float32),
-        "fingertip_center_to_target_distance_3d": fingertip_center_to_target_distance_3d.astype(np.float32),
-
-        # 仍保留 best 相关 debug
-        "target_progress_score": target_progress_score.astype(np.float32),
-        "target >> best_improvement(debug_only)": target_progress_best_improvement.astype(np.float32),
-
-        # ✅ min-distance progress debug（若未启用则只是记录）
-        "target_best_distance_3d(debug)": (best_target_distance_current.astype(np.float32) if best_target_distance_current is not None else np.zeros((number_of_environments,), dtype=np.float32)),
-        "target_reward_mode_is_min_dist(debug)": target_out.get(
-            "target_progress_reward_mode_is_min_dist",
-            np.zeros((number_of_environments,), dtype=np.float32),
-        ).astype(np.float32),
-
         "target_progress_reward_before_drop": target_progress_reward_before_drop.astype(np.float32),
-
-        # ✅ home: best debug
-        "home_progress_active_mask": home_progress_active_mask.astype(np.float32),
-        "best_home_distance_previous(debug)": best_home_distance_previous.astype(np.float32),
-        "best_home_distance_current(debug)": best_home_distance_current.astype(np.float32),
-        "home_distance_best_improvement(debug_only)": home_distance_best_improvement.astype(np.float32),
         "home_progress_reward": home_progress_reward.astype(np.float32),
-
-        # ✅ progress（用于 idle/ledger）
-        "positive_progress_reward": positive_progress_reward.astype(np.float32),
-
-        # ✅ NEW DESIGN #1 debug/terms
-        "drop_box_target_gate": (np.ones((number_of_environments,), dtype=np.float32) * float(DROP_BOX_TARGET_GATE)).astype(np.float32),
-        "in_drop_box_target_gate": in_drop_box_target_gate.astype(np.float32),
-        "drop_box_move_delta_3d": drop_box_move_delta_3d.astype(np.float32),
-        "drop_box_move_scale": (np.ones((number_of_environments,), dtype=np.float32) * float(drop_box_move_scale)).astype(np.float32),
-        "drop_box_stability_score": drop_box_stability_score.astype(np.float32),
-        "drop_box_stability_reward": drop_box_stability_reward.astype(np.float32),
-        "reset_due_to_drop_box_outside_target_gate": reset_due_to_drop_box_outside_target_gate.astype(np.float32),
-
-        # ✅ NEW: post-drop (<=K steps) cumulative movement stability reward
-        "post_drop_move_reward_steps_K": (np.ones((number_of_environments,), dtype=np.float32) * float(POST_DROP_MOVE_REWARD_STEPS)).astype(np.float32),
-        "post_drop_move_sum_3d": post_drop_move_sum_current.astype(np.float32),
-        "post_drop_move_sum_scale": (np.ones((number_of_environments,), dtype=np.float32) * float(post_drop_move_sum_scale)).astype(np.float32),
-        "post_drop_move_score": post_drop_move_score.astype(np.float32),
-        "post_drop_move_check_at_k": post_drop_move_check_at_k.astype(np.float32),
-        "post_drop_move_stability_reward": post_drop_move_stability_reward.astype(np.float32),
-
-        # ✅ NEW: post-drop away-from-cube short-term reward
-        "prev_dist_center_box(debug)": prev_fingertip_center_to_box_distance.astype(np.float32),
-        "post_drop_away_delta_dist_3d": post_drop_away_delta_dist_3d.astype(np.float32),
-        "post_drop_away_delta_lo": (np.ones((number_of_environments,), dtype=np.float32) * float(post_drop_away_delta_lo)).astype(np.float32),
-        "post_drop_away_delta_hi": (np.ones((number_of_environments,), dtype=np.float32) * float(post_drop_away_delta_hi)).astype(np.float32),
-        "post_drop_away_far_dist": (np.ones((number_of_environments,), dtype=np.float32) * float(post_drop_away_far_dist)).astype(np.float32),
-        "post_drop_away_step13_mask": post_drop_away_step13_mask.astype(np.float32),
-        "post_drop_away_step45_mask": post_drop_away_step45_mask.astype(np.float32),
-        "post_drop_away_step13_reward": post_drop_away_step13_reward.astype(np.float32),
-        "post_drop_away_step45_reward": post_drop_away_step45_reward.astype(np.float32),
-        "post_drop_away_reward": post_drop_away_reward.astype(np.float32),
-
-        # ✅ NEW DESIGN #2 debug/terms
-        "box_to_target_xy_distance": box_to_target_xy_distance.astype(np.float32),
-        "home_xy_bonus_scale": (np.ones((number_of_environments,), dtype=np.float32) * float(home_xy_bonus_scale)).astype(np.float32),
-        "home_xy_score": home_xy_score.astype(np.float32),
-        "home_xy_bonus_reward": home_xy_bonus_reward.astype(np.float32),
-
-        # ✅ extra reward
-        "extra_reward": extra_reward.astype(np.float32),
-
-        "at_home": at_home.astype(np.float32),
-        "settlement_penalty_negative": (-settlement_penalty).astype(np.float32),
-        "stall_penalty_negative": (-stall_penalty).astype(np.float32),
-        "timeout_penalty_negative": (-timeout_penalty).astype(np.float32),
-        "safety_penalty": safety_penalty.astype(np.float32),
-
-        "finger_gap_value": finger_gap_value.astype(np.float32),
-        "drop_gap_threshold": (np.ones((number_of_environments,), dtype=np.float32) * float(DROP_GAP_THRESHOLD)).astype(np.float32),
-        "has_dropped_after_lift": has_dropped_after_lift_current.astype(np.float32),
-        "has_dropped_after_lift_just_now": has_dropped_after_lift_just_now.astype(np.float32),
-
-        # ✅ NEW: drop->home target gate debug
-        "drop_to_home_target_gate": (np.ones((number_of_environments,), dtype=np.float32) * float(DROP_TO_HOME_TARGET_GATE)).astype(np.float32),
-        "in_drop_target_gate": in_drop_target_gate.astype(np.float32),
-        "home_reward_armed": home_reward_armed_current.astype(np.float32),
-        "reset_due_to_drop_not_in_target_gate": reset_due_to_drop_not_in_target_gate.astype(np.float32),
-
-        # ✅ NEW: reset designs debug
-        "steps_since_drop": steps_since_drop_current.astype(np.float32),
-        "post_drop_close_reset_dist": (np.ones((number_of_environments,), dtype=np.float32) * float(POST_DROP_CLOSE_RESET_DIST)).astype(np.float32),
-        "post_drop_close_reset_steps_K": (np.ones((number_of_environments,), dtype=np.float32) * float(POST_DROP_CLOSE_RESET_STEPS)).astype(np.float32),
-        "post_drop_check_at_k": post_drop_check_at_k.astype(np.float32),
         "post_drop_far_reward": post_drop_far_reward.astype(np.float32),
-        "post_drop_far_reward_value": (np.ones((number_of_environments,), dtype=np.float32) * float(POST_DROP_FAR_REWARD_VALUE)).astype(np.float32),
-
-        "reset_due_to_post_drop_close": reset_due_to_post_drop_close.astype(np.float32),
-        "reset_due_to_no_drop_far": reset_due_to_no_drop_far.astype(np.float32),
+        "drop_box_stability_reward": drop_box_stability_reward.astype(np.float32),
+        "post_drop_move_stability_reward": post_drop_move_stability_reward.astype(np.float32),
+        "post_drop_away_reward": post_drop_away_reward.astype(np.float32),
+        "task_success_bonus_reward": task_success_bonus_reward.astype(np.float32),
+        "positive_progress_reward": positive_progress_reward.astype(np.float32),
+        "extra_reward": extra_reward.astype(np.float32),
+        "settlement_penalty": settlement_penalty.astype(np.float32),
+        "stall_penalty": stall_penalty.astype(np.float32),
+        "timeout_penalty": timeout_penalty.astype(np.float32),
+        "safety_penalty": safety_penalty.astype(np.float32),
+        "total_reward": total_reward.astype(np.float32),
+        "success_just_achieved": success_just_achieved.astype(np.float32),
+        "stalled": stalled_mask.astype(np.float32),
+        "timeout": timeout_mask.astype(np.float32),
         "reset_episode_current": reset_episode_current.astype(np.float32),
-
-        # ✅ NEW: orientation constraint debug
-        "reach_success_dist_th": (np.ones((number_of_environments,), dtype=np.float32) * float(REACH_SUCCESS_DIST)).astype(np.float32),
-        "reach_success_now": reach_success_now.astype(np.float32),
-        "reach_success_achieved": reach_success_achieved_current.astype(np.float32),
-        "gripper_cos_down": gripper_cos_down.astype(np.float32),
-        "gripper_down_cos_min": (np.ones((number_of_environments,), dtype=np.float32) * float(gripper_down_cos_min)).astype(np.float32),
-        "orientation_constraint_active": orientation_constraint_active.astype(np.float32),
-        "reset_due_to_bad_gripper_orientation": reset_due_to_bad_gripper_orientation.astype(np.float32),
     }
 
     if np.any(invalid_mask):
@@ -987,84 +875,16 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         ).astype(np.float32)
 
     metrics = {
-        "fingertip_center_to_box_distance": fingertip_center_to_box_distance.astype(np.float32),
-        "pinch_quality_score": pinch_quality_score.astype(np.float32),
-        "grasp_approach_score": grasp_approach_score.astype(np.float32),
-        "lift_score": lift_score.astype(np.float32),
-        "lift_success_now": lift_success_now.astype(np.float32),
-        "lift_success_achieved": lift_success_achieved_current.astype(np.float32),
-
-        # ✅ NEW
-        "lift_success_bonus_reward": lift_success_bonus_reward.astype(np.float32),
-
-        "fingertip_center_to_target_distance_3d": fingertip_center_to_target_distance_3d.astype(np.float32),
-
-        # ✅ NEW: min-distance progress metric（若未启用则只是记录）
-        "target_best_distance_3d(debug)": (best_target_distance_current.astype(np.float32) if best_target_distance_current is not None else np.zeros((number_of_environments,), dtype=np.float32)),
-        "target_reward_mode_is_min_dist(debug)": target_out.get(
-            "target_progress_reward_mode_is_min_dist",
-            np.zeros((number_of_environments,), dtype=np.float32),
-        ).astype(np.float32),
-
-        "end_effector_to_home_distance": end_effector_to_home_distance.astype(np.float32),
-        "best_end_effector_to_home_distance(debug)": best_home_distance_current.astype(np.float32),
-
-        "home_progress_active_mask": home_progress_active_mask.astype(np.float32),
-
-        # ✅ NEW DESIGN #1 metrics
-        "in_drop_box_target_gate": in_drop_box_target_gate.astype(np.float32),
-        "drop_box_move_delta_3d": drop_box_move_delta_3d.astype(np.float32),
-        "drop_box_stability_reward": drop_box_stability_reward.astype(np.float32),
-        "reset_due_to_drop_box_outside_target_gate": reset_due_to_drop_box_outside_target_gate.astype(np.float32),
-
-        # ✅ NEW metrics: post-drop cumulative movement stability reward
-        "post_drop_move_sum_3d": post_drop_move_sum_current.astype(np.float32),
-        "post_drop_move_score": post_drop_move_score.astype(np.float32),
-        "post_drop_move_check_at_k": post_drop_move_check_at_k.astype(np.float32),
-        "post_drop_move_stability_reward": post_drop_move_stability_reward.astype(np.float32),
-
-        # ✅ NEW metrics: post-drop away-from-cube short-term reward
-        "post_drop_away_delta_dist_3d": post_drop_away_delta_dist_3d.astype(np.float32),
-        "post_drop_away_step13_reward": post_drop_away_step13_reward.astype(np.float32),
-        "post_drop_away_step45_reward": post_drop_away_step45_reward.astype(np.float32),
-        "post_drop_away_reward": post_drop_away_reward.astype(np.float32),
-
-        # ✅ NEW DESIGN #2 metrics
-        "box_to_target_xy_distance": box_to_target_xy_distance.astype(np.float32),
-        "home_xy_bonus_reward": home_xy_bonus_reward.astype(np.float32),
-
+        "total_reward": total_reward.astype(np.float32),
+        "positive_progress_reward": positive_progress_reward.astype(np.float32),
         "extra_reward": extra_reward.astype(np.float32),
-
-        "idle_steps_counter": idle_steps_counter_current.astype(np.float32),
-        "stalled": stalled_mask.astype(np.float32),
-        "attempt_failed_event": attempt_failed_event_mask.astype(np.float32),
-        "settlement_penalty": settlement_penalty.astype(np.float32),
-        "stall_penalty": stall_penalty.astype(np.float32),
-        "timeout": timeout_mask.astype(np.float32),
-
-        "finger_gap_value": finger_gap_value.astype(np.float32),
+        "lift_success_achieved": lift_success_achieved_current.astype(np.float32),
         "has_dropped_after_lift": has_dropped_after_lift_current.astype(np.float32),
-
-        # ✅ NEW: drop->home target gate metrics
-        "in_drop_target_gate": in_drop_target_gate.astype(np.float32),
-        "home_reward_armed": home_reward_armed_current.astype(np.float32),
-        "reset_due_to_drop_not_in_target_gate": reset_due_to_drop_not_in_target_gate.astype(np.float32),
-
-        # ✅ NEW: reset designs metrics
-        "steps_since_drop": steps_since_drop_current.astype(np.float32),
-        "post_drop_check_at_k": post_drop_check_at_k.astype(np.float32),
-        "post_drop_far_reward": post_drop_far_reward.astype(np.float32),
-        "reset_due_to_post_drop_close": reset_due_to_post_drop_close.astype(np.float32),
-        "reset_due_to_no_drop_far": reset_due_to_no_drop_far.astype(np.float32),
+        "at_home": at_home.astype(np.float32),
+        "success_just_achieved": success_just_achieved.astype(np.float32),
+        "stalled": stalled_mask.astype(np.float32),
+        "timeout": timeout_mask.astype(np.float32),
         "reset_episode_current": reset_episode_current.astype(np.float32),
-
-        # ✅ NEW: orientation constraint metrics
-        "reach_success_now": reach_success_now.astype(np.float32),
-        "reach_success_achieved": reach_success_achieved_current.astype(np.float32),
-        "orientation_constraint_active": orientation_constraint_active.astype(np.float32),
-        "gripper_cos_down": gripper_cos_down.astype(np.float32),
-        "gripper_down_cos_min": (np.ones((number_of_environments,), dtype=np.float32) * float(gripper_down_cos_min)).astype(np.float32),
-        "reset_due_to_bad_gripper_orientation": reset_due_to_bad_gripper_orientation.astype(np.float32),
     }
 
     return total_reward, terminated, has_cube_now.astype(bool), reward_terms, metrics
