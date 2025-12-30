@@ -309,12 +309,6 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     # reach success 之后直到 (drop 完成 && dist(ft_center, cube) > 0.1)：
     #   - 夹爪轴需保持与世界系向下方向夹角 <= 45°（cos_down >= cos(45°)）
     #   - 否则视为无效探索，reset episode
-    #
-    # 说明：
-    #   - reach success 这里采用：dist(ft_center, cube) <= 0.1，并做 latch（第一次达到后一直保持）
-    #   - 使用 compute_common 里已有的几何定义：
-    #       gripper_axis_world = normalize(tip_center - ee_site_pos)
-    #       cos_gripper_down = dot(gripper_axis_world, [0,0,-1])
     # ======================================================================
     REACH_SUCCESS_DIST = _get_float_config_value(reward_configuration, "rg3_reach_success_dist_rwdfunc", 0.10)
     POST_DROP_RELEASE_DIST = _get_float_config_value(reward_configuration, "rg3_post_drop_release_dist_rwdfunc", 0.10)
@@ -386,9 +380,6 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     # drop 后 cube 必须始终处于 target 的 |dx|,|dy|,|dz| <= gate(默认0.15) 区域内：
     #   - 在区域内：按 “cube 每步移动 delta(3D)” 给稳定奖励：移动越少奖励越大
     #   - 一旦 drop 后 cube 离开该区域：reset episode
-    #
-    # 注意：
-    #   - 该稳定奖励不会计入 idle_counter 的“progress”判定（避免原地刷分），仅作为额外 reward
     # ======================================================================
     DROP_BOX_TARGET_GATE = _get_float_config_value(reward_configuration, "rg3_drop_box_target_gate_rwdfunc", 0.15)
     delta_box_to_target = np.abs(box_position_world - target_position_world).astype(np.float32)
@@ -438,7 +429,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     )
     if steps_since_drop_previous.shape[0] != number_of_environments:
         steps_since_drop_previous = np.zeros((number_of_environments,), dtype=np.int32)
-    
+
     # reset / lift_success 切段：计数清零（drop 计数只在 lift_success 后才有意义）
     steps_since_drop_previous = np.where(reset_episode | lift_success_just_achieved, 0, steps_since_drop_previous).astype(np.int32)
 
@@ -451,19 +442,6 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     # ======================================================================
     # ✅ NEW (REQUESTED):
     # drop 后 5 步内远离 cube 的短时奖励：
-    #   - 第 1~3 步：Δ(dist_ftcenter_box_3d) ∈ [0.04, 0.08] -> reward
-    #   - 第 4~5 步：dist_ftcenter_box_3d >= 0.15 -> reward
-    #
-    # 说明：
-    #   - Δ 使用上一帧 info["prev_dist_center_box"]（由本函数末尾写回）
-    #   - 作为 extra_reward，不参与 progress ledger / idle 判定（防刷分）
-    #
-    # 配置项（可选）：
-    #   - rg3_post_drop_away_delta_lo_rwdfunc (default 0.04)
-    #   - rg3_post_drop_away_delta_hi_rwdfunc (default 0.08)
-    #   - rg3_post_drop_away_far_dist_rwdfunc  (default 0.15)
-    #   - rg3_R_post_drop_away_step13_rwdfunc  (default 0.5)
-    #   - rg3_R_post_drop_away_step45_rwdfunc  (default 1.0)
     # ======================================================================
     prev_fingertip_center_to_box_distance = np.asarray(
         info.get("prev_dist_center_box", fingertip_center_to_box_distance.copy()),
@@ -527,15 +505,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
 
     # ======================================================================
     # ✅ NEW (REQUESTED):
-    # drop 后前 K 步内（默认 5 步），累计 cube 的 3D 移动（路径长度）越少 => 一次性奖励越大
-    #
-    # - 与 “drop 后第 K 步 close-reset” 同时存在：即使本步触发 reset，也会先发该奖励
-    # - 奖励值默认很小（max≈1），放在 extra_reward，不计入 progress ledger/idle 判定（防刷分）
-    #
-    # 配置项：
-    #   - rg3_post_drop_move_reward_steps_rwdfunc (默认=POST_DROP_CLOSE_RESET_STEPS)
-    #   - rg3_post_drop_move_sum_scale_rwdfunc    (默认 0.03)
-    #   - rg3_R_post_drop_move_stability_rwdfunc  (默认 1.0)
+    # drop 后前 K 步内累计 cube 3D 移动越少 => 一次性奖励越大
     # ======================================================================
     POST_DROP_MOVE_REWARD_STEPS = max(
         _get_int_config_value(
@@ -593,7 +563,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         * (~reset_due_to_drop_box_outside_target_gate).astype(np.float32)
     ).astype(np.float32)
 
-    # 只在 “第 K 步这一刻” 做一次判定（避免 >=K 导致之后每步都可能触发/反复判定）
+    # 只在 “第 K 步这一刻” 做一次判定
     post_drop_check_at_k = (
         has_dropped_after_lift_current
         & (steps_since_drop_current == int(POST_DROP_CLOSE_RESET_STEPS))
@@ -605,7 +575,6 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     ).astype(bool)
 
     # 第 K 步未触发 close-reset（距离 > 0.05）：给一次性 reward
-    # （若同一帧因为其它 drop gate reset，则不发这笔奖励）
     post_drop_far_reward = (
         float(POST_DROP_FAR_REWARD_VALUE)
         * (
@@ -687,18 +656,12 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     target_progress_score = target_out["target_progress_score"].astype(np.float32)
     target_progress_best_improvement = target_out["target_progress_best_improvement"].astype(np.float32)
 
-    # ✅ NEW: potential shaping 相关调试量
-    target_progress_potential = target_out["target_progress_potential"].astype(np.float32)
-    target_progress_potential_delta = target_out["target_progress_potential_delta"].astype(np.float32)
-    prev_target_progress_potential_current = target_out["prev_target_progress_potential_current"].astype(np.float32)
-
     best_target_distance_current = target_out.get("best_target_distance_current", None)
     if best_target_distance_current is not None:
         best_target_distance_current = np.asarray(best_target_distance_current, dtype=np.float32)
 
     # ======================================================================
     # ✅ drop 后：home reward 只在 home_reward_armed_current=True 时启用
-    #     （armed 仅在 drop 那一刻满足 target gate 才会置 True）
     # ======================================================================
     home_progress_active_mask = (has_dropped_after_lift_current & home_reward_armed_current).astype(bool)
 
@@ -719,16 +682,9 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     best_home_distance_previous = home_out["best_home_distance_previous"].astype(np.float32)
     best_home_distance_current = home_out["best_home_distance_current"].astype(np.float32)
     home_distance_best_improvement = home_out["home_distance_best_improvement"].astype(np.float32)
-
-    # ✅ NEW: potential shaping home
     home_progress_reward = home_out["home_progress_reward"].astype(np.float32)
-    home_progress_potential = home_out["home_progress_potential"].astype(np.float32)
-    home_progress_potential_delta = home_out["home_progress_potential_delta"].astype(np.float32)
-    prev_home_progress_potential_current = home_out["prev_home_progress_potential_current"].astype(np.float32)
-    home_progress_distance_scale_current = home_out["home_progress_distance_scale_current"].astype(np.float32)
-    home_start_ee_to_home_distance_snapshot_current = home_out["home_start_ee_to_home_distance_snapshot_current"].astype(np.float32)
 
-    # ✅ progress reward（用于 idle/progress ledger 判定）——保持原有逻辑，不把“稳定奖励”算进去，避免刷分
+    # ✅ progress reward（用于 idle/progress ledger 判定）
     positive_progress_reward = (
         pre_lift_progress_reward * before_lift_success_mask.astype(np.float32)
         + lift_slow_reward * before_lift_success_mask.astype(np.float32)
@@ -902,17 +858,9 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     info["reach_grasp_transport_target_progress_distance_scale"] = target_progress_distance_scale_current.astype(np.float32)
     info["reach_grasp_transport_best_target_progress_score"] = best_target_progress_score_current.astype(np.float32)
 
-    # ✅ NEW: min-distance progress state（用于可选奖励模式）
+    # ✅ NEW: min-distance progress state（用于奖励）
     if best_target_distance_current is not None:
         info["reach_grasp_transport_best_target_distance_3d"] = best_target_distance_current.astype(np.float32)
-
-    # ✅ NEW: 记录势函数 shaping 的 prev potential（下一步用）
-    info["reach_grasp_transport_prev_target_progress_potential"] = prev_target_progress_potential_current.astype(np.float32)
-
-    # ✅ NEW: home potential shaping state
-    info["reach_grasp_transport_prev_home_progress_potential"] = prev_home_progress_potential_current.astype(np.float32)
-    info["reach_grasp_transport_home_progress_distance_scale"] = home_progress_distance_scale_current.astype(np.float32)
-    info["reach_grasp_transport_home_start_ee_to_home_distance_snapshot"] = home_start_ee_to_home_distance_snapshot_current.astype(np.float32)
 
     info["reach_grasp_transport_best_end_effector_to_home_distance"] = best_home_distance_current.astype(np.float32)
 
@@ -937,11 +885,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         "target_progress_score": target_progress_score.astype(np.float32),
         "target >> best_improvement(debug_only)": target_progress_best_improvement.astype(np.float32),
 
-        # ✅ NEW: potential shaping debug
-        "target_progress_potential": target_progress_potential.astype(np.float32),
-        "target_progress_potential_delta": target_progress_potential_delta.astype(np.float32),
-
-        # ✅ NEW: min-distance progress debug（若未启用则只是记录）
+        # ✅ min-distance progress debug（若未启用则只是记录）
         "target_best_distance_3d(debug)": (best_target_distance_current.astype(np.float32) if best_target_distance_current is not None else np.zeros((number_of_environments,), dtype=np.float32)),
         "target_reward_mode_is_min_dist(debug)": target_out.get(
             "target_progress_reward_mode_is_min_dist",
@@ -950,14 +894,11 @@ def _compute_reward_reach_grasp_transport(env, data, info):
 
         "target_progress_reward_before_drop": target_progress_reward_before_drop.astype(np.float32),
 
-        # ✅ home: best debug + potential shaping
+        # ✅ home: best debug
         "home_progress_active_mask": home_progress_active_mask.astype(np.float32),
         "best_home_distance_previous(debug)": best_home_distance_previous.astype(np.float32),
         "best_home_distance_current(debug)": best_home_distance_current.astype(np.float32),
         "home_distance_best_improvement(debug_only)": home_distance_best_improvement.astype(np.float32),
-
-        "home_progress_potential": home_progress_potential.astype(np.float32),
-        "home_progress_potential_delta": home_progress_potential_delta.astype(np.float32),
         "home_progress_reward": home_progress_reward.astype(np.float32),
 
         # ✅ progress（用于 idle/ledger）
@@ -1057,8 +998,6 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         "lift_success_bonus_reward": lift_success_bonus_reward.astype(np.float32),
 
         "fingertip_center_to_target_distance_3d": fingertip_center_to_target_distance_3d.astype(np.float32),
-        "target_progress_potential": target_progress_potential.astype(np.float32),
-        "target_progress_potential_delta": target_progress_potential_delta.astype(np.float32),
 
         # ✅ NEW: min-distance progress metric（若未启用则只是记录）
         "target_best_distance_3d(debug)": (best_target_distance_current.astype(np.float32) if best_target_distance_current is not None else np.zeros((number_of_environments,), dtype=np.float32)),
@@ -1070,10 +1009,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         "end_effector_to_home_distance": end_effector_to_home_distance.astype(np.float32),
         "best_end_effector_to_home_distance(debug)": best_home_distance_current.astype(np.float32),
 
-        # ✅ home potential shaping metrics
         "home_progress_active_mask": home_progress_active_mask.astype(np.float32),
-        "home_progress_potential": home_progress_potential.astype(np.float32),
-        "home_progress_potential_delta": home_progress_potential_delta.astype(np.float32),
 
         # ✅ NEW DESIGN #1 metrics
         "in_drop_box_target_gate": in_drop_box_target_gate.astype(np.float32),
