@@ -1,5 +1,4 @@
 （目前，已经实现pick-place-home全部过程的是基于"whole process success i think"（git）这个提交，而后面的提交是我继续再这个基础上做的一些修改，还有待继续验证和跟进）
-[Screencast from 12-31-2025 12:52:39 AM.webm](https://github.com/user-attachments/assets/11f08dcf-c2f0-4d10-9abf-c6ebbe6a2eb0)
 
 首先我自己回忆一下，经历过：
 刚开始的各种shaping堆叠，
@@ -14,6 +13,7 @@ uv run scripts/train.py --env=panda-pick-place-reach-grasp-transport --sim-backe
 
 测试训练后的结果（这个结果中，home位置设置的有点尴尬，但是勉强可用，注意这个结果是基于"whole process success i think"这个提交训练的，基本满足当前要求pick-place-home）：
 uv run scripts/play.py --env panda-pick-place-reach-grasp-transport --policy runs/panda-pick-place-reach-grasp-transport/25-12-29_15-19-09-345491_PPO/checkpoints/best_agent.pickle
+[Screencast from 12-31-2025 12:52:39 AM.webm](https://github.com/user-attachments/assets/11f08dcf-c2f0-4d10-9abf-c6ebbe6a2eb0)
 
 训练的过程曲线查看：
 uv run tensorboard --logdir runs/panda-pick-place-reach-grasp-transport/25-12-29_15-19-09-345491_PPO/
