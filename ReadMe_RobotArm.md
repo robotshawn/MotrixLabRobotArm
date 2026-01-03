@@ -1,5 +1,6 @@
 （目前，已经实现pick-place-home全部过程的是基于"whole process success i think"（git）这个提交，而后面的提交是我继续再这个基础上做的一些修改，还有待继续验证和跟进）
-<img width="879" height="569" alt="image" src="https://github.com/user-attachments/assets/0ea65644-f579-472d-a96a-0c3cf4c0d348" />
+<img width="864" height="579" alt="image" src="https://github.com/user-attachments/assets/671bfc15-2ee9-491d-b57a-0c8900b00f13" />
+
 
 首先我自己回忆一下，经历过：
 刚开始的各种shaping堆叠，
