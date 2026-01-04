@@ -472,7 +472,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         _get_int_config_value(reward_configuration, "rg3_post_drop_close_reset_steps_rwdfunc", 5),
         0,
     )
-    POST_DROP_FAR_REWARD_VALUE = _get_float_config_value(reward_configuration, "rg3_R_post_drop_far_rwdfunc", 10.0)
+    POST_DROP_FAR_REWARD_VALUE = _get_float_config_value(reward_configuration, "rg3_R_post_drop_far_rwdfunc", 20.0)
 
     # ======================================================================
     # ✅ NEW (REQUESTED):
@@ -669,6 +669,110 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     # lift 成功后 & drop 前：仍然必须拿着物体（has_cube_now）才继续刷 transport progress
     post_lift_before_drop_mask = (lift_success_achieved_current & (~has_dropped_after_lift_current) & has_cube_now).astype(bool)
 
+    # ======================================================================
+    # ✅ NEW (REQUESTED):
+    # Drop 的 “Z-only 减速区域” reward（纯奖励，不添加惩罚项，不作用于 XY）
+    #
+    # 目标：为 |dz|<=0.08 的 drop gate 做准备，在 0.08~0.15 的 band 内：
+    #   - 仅奖励刷新历史最小 dz（min-distance progress，避免站桩刷分）
+    #   - 乘以 Z 速度因子：|Δz| 越小 reward 越大（鼓励减速）
+    #   - 可选 ramp：dz 越接近 lo（0.08）权重越大
+    # ======================================================================
+    drop_z_slow_zone_lo = _get_float_config_value(
+        reward_configuration,
+        "rg3_drop_z_slow_zone_lo_rwdfunc",
+        float(DROP_TO_HOME_TARGET_GATE_Z),
+    )
+    drop_z_slow_zone_hi = _get_float_config_value(
+        reward_configuration,
+        "rg3_drop_z_slow_zone_hi_rwdfunc",
+        float(DROP_TO_HOME_TARGET_GATE_XY),
+    )
+
+    # sanitize: ensure hi > lo
+    drop_z_slow_zone_lo = float(max(drop_z_slow_zone_lo, 0.0))
+    drop_z_slow_zone_hi = float(max(drop_z_slow_zone_hi, drop_z_slow_zone_lo + 1e-6))
+
+    ee_z_now = end_effector_position_world[:, 2].astype(np.float32)
+    target_z_now = target_position_world[:, 2].astype(np.float32)
+    ee_to_target_dz = np.abs(ee_z_now - target_z_now).astype(np.float32)
+
+    in_drop_z_slow_zone = (
+        (ee_to_target_dz >= float(drop_z_slow_zone_lo))
+        & (ee_to_target_dz <= float(drop_z_slow_zone_hi))
+    ).astype(bool)
+
+    # prev ee_z for speed factor
+    prev_ee_z_previous = np.asarray(
+        info.get("reach_grasp_transport_prev_ee_z", ee_z_now.copy()),
+        dtype=np.float32,
+    )
+    if prev_ee_z_previous.shape[0] != number_of_environments:
+        prev_ee_z_previous = ee_z_now.copy().astype(np.float32)
+    prev_ee_z_previous = np.where(reset_episode, ee_z_now, prev_ee_z_previous).astype(np.float32)
+
+    ee_z_delta_abs = np.abs(ee_z_now - prev_ee_z_previous).astype(np.float32)
+    drop_z_slow_delta_scale = _get_float_config_value(
+        reward_configuration, "rg3_drop_z_slow_delta_scale_rwdfunc", 0.01
+    )
+    drop_z_speed_score = _score_near_distance(ee_z_delta_abs, drop_z_slow_delta_scale).astype(np.float32)
+
+    # min-distance state for dz (global during post_lift_before_drop, not only inside zone)
+    best_ee_target_dz_previous = np.asarray(
+        info.get("reach_grasp_transport_best_ee_target_dz", ee_to_target_dz.copy()),
+        dtype=np.float32,
+    )
+    if best_ee_target_dz_previous.shape[0] != number_of_environments:
+        best_ee_target_dz_previous = ee_to_target_dz.copy().astype(np.float32)
+
+    best_ee_target_dz_previous = np.where(
+        attempt_reset | lift_success_just_achieved | has_dropped_after_lift_current,
+        ee_to_target_dz,
+        best_ee_target_dz_previous,
+    ).astype(np.float32)
+    # 非 active 段对齐到当前，避免重新进入时白嫖
+    best_ee_target_dz_previous = np.where(
+        ~post_lift_before_drop_mask,
+        ee_to_target_dz,
+        best_ee_target_dz_previous,
+    ).astype(np.float32)
+
+    best_ee_target_dz_current = np.where(
+        post_lift_before_drop_mask,
+        np.minimum(best_ee_target_dz_previous, ee_to_target_dz),
+        best_ee_target_dz_previous,
+    ).astype(np.float32)
+
+    drop_z_slow_min_dist_eps = _get_float_config_value(
+        reward_configuration, "rg3_drop_z_slow_min_dist_eps_rwdfunc", 1e-5
+    )
+    dz_best_improvement = np.maximum(
+        0.0,
+        best_ee_target_dz_previous - best_ee_target_dz_current - float(max(drop_z_slow_min_dist_eps, 0.0)),
+    ).astype(np.float32)
+
+    dz_span = float(max(drop_z_slow_zone_hi - drop_z_slow_zone_lo, 1e-6))
+    dz_improve_norm = (dz_best_improvement / dz_span).astype(np.float32)
+    dz_ramp = _clip_to_unit_interval((float(drop_z_slow_zone_hi) - ee_to_target_dz) / dz_span).astype(np.float32)
+
+    drop_z_slow_weight = _get_float_config_value(
+        reward_configuration, "rg3_R_drop_z_slow_rwdfunc", 2.0
+    )
+    drop_z_slow_reward = (
+        float(drop_z_slow_weight)
+        * dz_improve_norm
+        * drop_z_speed_score
+        * dz_ramp
+        * in_drop_z_slow_zone.astype(np.float32)
+        * post_lift_before_drop_mask.astype(np.float32)
+    ).astype(np.float32)
+
+    drop_z_slow_step_cap = _get_float_config_value(
+        reward_configuration, "rg3_drop_z_slow_step_cap_rwdfunc", 0.0
+    )
+    if drop_z_slow_step_cap > 0.0:
+        drop_z_slow_reward = np.clip(drop_z_slow_reward, 0.0, float(drop_z_slow_step_cap)).astype(np.float32)
+
     target_out = compute_target_progress_before_drop(
         reward_configuration=reward_configuration,
         info=info,
@@ -708,6 +812,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         + target_progress_reward_before_drop
         + home_progress_reward
         + post_drop_far_reward
+        + drop_z_slow_reward
     ).astype(np.float32)
 
     minimum_progress_epsilon = _get_float_config_value(reward_configuration, "rg3_progress_eps_rwdfunc", 0.0)
@@ -851,6 +956,10 @@ def _compute_reward_reach_grasp_transport(env, data, info):
 
     info["reach_grasp_transport_has_dropped_after_lift"] = has_dropped_after_lift_current.astype(bool)
 
+    # ✅ NEW: drop Z-slowdown state
+    info["reach_grasp_transport_best_ee_target_dz"] = best_ee_target_dz_current.astype(np.float32)
+    info["reach_grasp_transport_prev_ee_z"] = ee_z_now.astype(np.float32)
+
     # ✅ NEW: reach success latch（用于姿态约束区间）
     info["reach_grasp_transport_reach_success_achieved"] = reach_success_achieved_current.astype(bool)
 
@@ -881,6 +990,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         "target_progress_reward_before_drop": target_progress_reward_before_drop.astype(np.float32),
         "home_progress_reward": home_progress_reward.astype(np.float32),
         "post_drop_far_reward": post_drop_far_reward.astype(np.float32),
+        "drop_z_slow_reward": drop_z_slow_reward.astype(np.float32),
         "drop_box_stability_reward": drop_box_stability_reward.astype(np.float32),
         "post_drop_move_stability_reward": post_drop_move_stability_reward.astype(np.float32),
         "post_drop_away_reward": post_drop_away_reward.astype(np.float32),
