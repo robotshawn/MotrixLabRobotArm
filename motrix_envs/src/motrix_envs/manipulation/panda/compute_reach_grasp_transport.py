@@ -412,12 +412,76 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     # ======================================================================
     DROP_BOX_TARGET_GATE_XY = _get_float_config_value(reward_configuration, "rg3_drop_box_target_gate_rwdfunc", 0.15)
     DROP_BOX_TARGET_GATE_Z = _get_float_config_value(reward_configuration, "rg3_drop_box_target_gate_z_rwdfunc", 0.08)
- 
+
     delta_box_to_target = np.abs(box_position_world - target_position_world).astype(np.float32)
     in_drop_box_target_gate = (
         (delta_box_to_target[:, :2] <= float(DROP_BOX_TARGET_GATE_XY)).all(axis=1)
         & (delta_box_to_target[:, 2] <= float(DROP_BOX_TARGET_GATE_Z))
     ).astype(bool)
+
+    # ======================================================================
+    # ✅ NEW (REQUESTED):
+    # (1) 一次性 target-zone bonus：cube 到达 |dx|,|dy|,|dz| 区域（默认用 drop_box_target_gate 的阈值）
+    #     - 仅在 lift_success 后且 drop 前（仍拿着 cube）时触发
+    #     - 一次性（latched）
+    # (2) 一次性 drop bonus：drop 发生瞬间给奖励（只在合法 drop 且 cube 在 target-zone 时）
+    # ======================================================================
+    TARGET_ZONE_BONUS_GATE_XY = _get_float_config_value(
+        reward_configuration, "rg3_target_zone_bonus_gate_xy_rwdfunc", float(DROP_BOX_TARGET_GATE_XY)
+    )
+    TARGET_ZONE_BONUS_GATE_Z = _get_float_config_value(
+        reward_configuration, "rg3_target_zone_bonus_gate_z_rwdfunc", float(DROP_BOX_TARGET_GATE_Z)
+    )
+
+    in_target_zone_for_bonus = (
+        (delta_box_to_target[:, :2] <= float(TARGET_ZONE_BONUS_GATE_XY)).all(axis=1)
+        & (delta_box_to_target[:, 2] <= float(TARGET_ZONE_BONUS_GATE_Z))
+    ).astype(bool)
+
+    target_zone_bonus_paid_previous = np.asarray(
+        info.get("reach_grasp_transport_target_zone_bonus_paid", np.zeros(number_of_environments, dtype=bool)),
+        dtype=bool,
+    )
+    if target_zone_bonus_paid_previous.shape[0] != number_of_environments:
+        target_zone_bonus_paid_previous = np.zeros((number_of_environments,), dtype=bool)
+
+    # attempt_reset：新一轮尝试；lift_success_just_achieved：进入 transport 段时清零
+    target_zone_bonus_paid_previous = np.where(
+        attempt_reset | lift_success_just_achieved,
+        False,
+        target_zone_bonus_paid_previous,
+    ).astype(bool)
+
+    target_zone_active_mask = (
+        lift_success_achieved_current
+        & (~has_dropped_after_lift_current)
+        & has_cube_now
+    ).astype(bool)
+
+    target_zone_bonus_just_now = (
+        target_zone_active_mask
+        & in_target_zone_for_bonus
+        & (~target_zone_bonus_paid_previous)
+    ).astype(bool)
+
+    target_zone_bonus_value = _get_float_config_value(
+        reward_configuration, "rg3_R_target_zone_bonus_rwdfunc", 30.0
+    )
+    target_zone_bonus_reward = (
+        float(target_zone_bonus_value) * target_zone_bonus_just_now.astype(np.float32)
+    ).astype(np.float32)
+
+    target_zone_bonus_paid_current = (
+        target_zone_bonus_paid_previous | target_zone_bonus_just_now
+    ).astype(bool)
+
+    drop_bonus_value = _get_float_config_value(
+        reward_configuration, "rg3_R_drop_bonus_rwdfunc", 10.0
+    )
+    drop_bonus_reward = (
+        float(drop_bonus_value)
+        * (has_dropped_after_lift_just_now & in_drop_target_gate & in_drop_box_target_gate).astype(np.float32)
+    ).astype(np.float32)
 
     reset_due_to_drop_box_outside_target_gate = (has_dropped_after_lift_current & (~in_drop_box_target_gate)).astype(bool)
 
@@ -813,6 +877,8 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         + home_progress_reward
         + post_drop_far_reward
         + drop_z_slow_reward
+        + target_zone_bonus_reward
+        + drop_bonus_reward
     ).astype(np.float32)
 
     minimum_progress_epsilon = _get_float_config_value(reward_configuration, "rg3_progress_eps_rwdfunc", 0.0)
@@ -972,6 +1038,9 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     # ✅ NEW: home reward gating latch
     info["reach_grasp_transport_home_reward_armed"] = home_reward_armed_current.astype(bool)
 
+    # ✅ NEW: one-time target-zone bonus latch
+    info["reach_grasp_transport_target_zone_bonus_paid"] = target_zone_bonus_paid_current.astype(bool)
+
     # ✅ min-distance progress state（用于奖励）
     info["reach_grasp_transport_best_target_distance_3d"] = best_target_distance_current.astype(np.float32)
 
@@ -991,6 +1060,8 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         "home_progress_reward": home_progress_reward.astype(np.float32),
         "post_drop_far_reward": post_drop_far_reward.astype(np.float32),
         "drop_z_slow_reward": drop_z_slow_reward.astype(np.float32),
+        "target_zone_bonus_reward": target_zone_bonus_reward.astype(np.float32),
+        "drop_bonus_reward": drop_bonus_reward.astype(np.float32),
         "drop_box_stability_reward": drop_box_stability_reward.astype(np.float32),
         "post_drop_move_stability_reward": post_drop_move_stability_reward.astype(np.float32),
         "post_drop_away_reward": post_drop_away_reward.astype(np.float32),
@@ -1021,6 +1092,8 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         "has_dropped_after_lift": has_dropped_after_lift_current.astype(np.float32),
         "at_home": at_home.astype(np.float32),
         "success_just_achieved": success_just_achieved.astype(np.float32),
+        "target_zone_bonus_reward": target_zone_bonus_reward.astype(np.float32),
+        "drop_bonus_reward": drop_bonus_reward.astype(np.float32),
         "stalled": stalled_mask.astype(np.float32),
         "timeout": timeout_mask.astype(np.float32),
         "reset_episode_current": reset_episode_current.astype(np.float32),
