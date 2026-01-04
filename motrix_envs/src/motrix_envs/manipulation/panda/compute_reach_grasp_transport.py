@@ -305,6 +305,30 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     has_dropped_after_lift_just_now = (has_dropped_after_lift_current & (~has_dropped_after_lift_previous)).astype(bool)
 
     # ======================================================================
+    # ✅ FIX: steps_since_drop_current is used later (e.g., drop_box_stability_window),
+    # so it MUST be computed before first use.
+    # ======================================================================
+    steps_since_drop_previous = np.asarray(
+        info.get("reach_grasp_transport_steps_since_drop", np.zeros(number_of_environments, dtype=np.int32)),
+        dtype=np.int32,
+    )
+    if steps_since_drop_previous.shape[0] != number_of_environments:
+        steps_since_drop_previous = np.zeros((number_of_environments,), dtype=np.int32)
+
+    # reset / lift_success 切段：计数清零（drop 计数只在 lift_success 后才有意义）
+    steps_since_drop_previous = np.where(
+        reset_episode | lift_success_just_achieved,
+        0,
+        steps_since_drop_previous,
+    ).astype(np.int32)
+
+    steps_since_drop_current = np.where(
+        has_dropped_after_lift_current,
+        np.where(has_dropped_after_lift_just_now, 0, steps_since_drop_previous + 1),
+        0,
+    ).astype(np.int32)
+
+    # ======================================================================
     # ✅ NEW (REQUESTED):
     # reach success 之后直到 (drop 完成 && dist(ft_center, cube) > 0.1)：
     #   - 夹爪轴需保持与世界系向下方向夹角 <= 45°（cos_down >= cos(45°)）
@@ -353,9 +377,14 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     #     才“启动/armed”回 home 的 reward（latched）
     #   - 若 drop 发生瞬间不在区域内 => reset episode
     # ======================================================================
-    DROP_TO_HOME_TARGET_GATE = _get_float_config_value(reward_configuration, "rg3_drop_to_home_target_gate_rwdfunc", 0.15)
+    DROP_TO_HOME_TARGET_GATE_XY = _get_float_config_value(reward_configuration, "rg3_drop_to_home_target_gate_rwdfunc", 0.15)
+    DROP_TO_HOME_TARGET_GATE_Z = _get_float_config_value(reward_configuration, "rg3_drop_to_home_target_gate_z_rwdfunc", 0.08)
+
     delta_ee_to_target = np.abs(end_effector_position_world - target_position_world).astype(np.float32)
-    in_drop_target_gate = (delta_ee_to_target <= float(DROP_TO_HOME_TARGET_GATE)).all(axis=1).astype(bool)
+    in_drop_target_gate = (
+        (delta_ee_to_target[:, :2] <= float(DROP_TO_HOME_TARGET_GATE_XY)).all(axis=1)
+        & (delta_ee_to_target[:, 2] <= float(DROP_TO_HOME_TARGET_GATE_Z))
+    ).astype(bool)
 
     home_reward_armed_previous = np.asarray(
         info.get("reach_grasp_transport_home_reward_armed", np.zeros(number_of_environments, dtype=bool)),
@@ -381,9 +410,14 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     #   - 在区域内：按 “cube 每步移动 delta(3D)” 给稳定奖励：移动越少奖励越大
     #   - 一旦 drop 后 cube 离开该区域：reset episode
     # ======================================================================
-    DROP_BOX_TARGET_GATE = _get_float_config_value(reward_configuration, "rg3_drop_box_target_gate_rwdfunc", 0.15)
+    DROP_BOX_TARGET_GATE_XY = _get_float_config_value(reward_configuration, "rg3_drop_box_target_gate_rwdfunc", 0.15)
+    DROP_BOX_TARGET_GATE_Z = _get_float_config_value(reward_configuration, "rg3_drop_box_target_gate_z_rwdfunc", 0.08)
+ 
     delta_box_to_target = np.abs(box_position_world - target_position_world).astype(np.float32)
-    in_drop_box_target_gate = (delta_box_to_target <= float(DROP_BOX_TARGET_GATE)).all(axis=1).astype(bool)
+    in_drop_box_target_gate = (
+        (delta_box_to_target[:, :2] <= float(DROP_BOX_TARGET_GATE_XY)).all(axis=1)
+        & (delta_box_to_target[:, 2] <= float(DROP_BOX_TARGET_GATE_Z))
+    ).astype(bool)
 
     reset_due_to_drop_box_outside_target_gate = (has_dropped_after_lift_current & (~in_drop_box_target_gate)).astype(bool)
 
@@ -405,39 +439,40 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     drop_box_stability_weight = _get_float_config_value(reward_configuration, "rg3_R_drop_box_stability_rwdfunc", 0.5)
 
     drop_box_stability_score = _score_near_distance(drop_box_move_delta_3d, drop_box_move_scale)
+
+    # ✅ NEW: drop 后仅给 K 步稳定奖励，避免“reward 永久在线”导致刷分
+    drop_box_stability_steps = max(
+        _get_int_config_value(reward_configuration, "rg3_drop_box_stability_steps_rwdfunc", 5),
+        0,
+    )
+    if drop_box_stability_steps > 0:
+        # 从 step=1 开始统计（避开 drop 当帧的落体/碰撞大位移）
+        in_drop_box_stability_window = (
+            has_dropped_after_lift_current
+            & in_drop_box_target_gate
+            & (steps_since_drop_current >= 1)
+            & (steps_since_drop_current <= int(drop_box_stability_steps))
+        ).astype(np.float32)
+    else:
+        in_drop_box_stability_window = np.zeros((number_of_environments,), dtype=np.float32)
+
     drop_box_stability_reward = (
         drop_box_stability_weight
         * drop_box_stability_score
-        * (has_dropped_after_lift_current & in_drop_box_target_gate).astype(np.float32)
+        * in_drop_box_stability_window
     ).astype(np.float32)
 
     # ======================================================================
     # ✅ NEW RESET DESIGNS (existing):
-    # 1) drop 后经过 K 步，如果 cube 与爪尖中心距离 <= 0.05 -> reset episode
-    # 2) 没有 drop（但 lift_success 已经发生）时，如果 cube 与爪尖中心距离 > 0.05 -> reset episode
+    # 1) drop 后经过 K 步，如果 cube 与爪尖中心距离 <= 0.06 -> reset episode
+    # 2) 没有 drop（但 lift_success 已经发生）时，如果 cube 与爪尖中心距离 > 0.06 -> reset episode
     # ======================================================================
-    POST_DROP_CLOSE_RESET_DIST = 0.05
+    POST_DROP_CLOSE_RESET_DIST = 0.06
     POST_DROP_CLOSE_RESET_STEPS = max(
         _get_int_config_value(reward_configuration, "rg3_post_drop_close_reset_steps_rwdfunc", 5),
         0,
     )
-    POST_DROP_FAR_REWARD_VALUE = _get_float_config_value(reward_configuration, "rg3_R_post_drop_far_rwdfunc", 5.0)
-
-    steps_since_drop_previous = np.asarray(
-        info.get("reach_grasp_transport_steps_since_drop", np.zeros(number_of_environments, dtype=np.int32)),
-        dtype=np.int32,
-    )
-    if steps_since_drop_previous.shape[0] != number_of_environments:
-        steps_since_drop_previous = np.zeros((number_of_environments,), dtype=np.int32)
-
-    # reset / lift_success 切段：计数清零（drop 计数只在 lift_success 后才有意义）
-    steps_since_drop_previous = np.where(reset_episode | lift_success_just_achieved, 0, steps_since_drop_previous).astype(np.int32)
-
-    steps_since_drop_current = np.where(
-        has_dropped_after_lift_current,
-        np.where(has_dropped_after_lift_just_now, 0, steps_since_drop_previous + 1),
-        0,
-    ).astype(np.int32)
+    POST_DROP_FAR_REWARD_VALUE = _get_float_config_value(reward_configuration, "rg3_R_post_drop_far_rwdfunc", 10.0)
 
     # ======================================================================
     # ✅ NEW (REQUESTED):
@@ -457,12 +492,12 @@ def _compute_reward_reach_grasp_transport(env, data, info):
 
     post_drop_away_delta_dist_3d = (fingertip_center_to_box_distance - prev_fingertip_center_to_box_distance).astype(np.float32)
 
-    post_drop_away_delta_lo = _get_float_config_value(reward_configuration, "rg3_post_drop_away_delta_lo_rwdfunc", 0.04)
-    post_drop_away_delta_hi = _get_float_config_value(reward_configuration, "rg3_post_drop_away_delta_hi_rwdfunc", 0.08)
-    post_drop_away_far_dist = _get_float_config_value(reward_configuration, "rg3_post_drop_away_far_dist_rwdfunc", 0.15)
+    post_drop_away_delta_lo = 0.04
+    post_drop_away_delta_hi =  0.08
+    post_drop_away_far_dist = 0.15
 
-    post_drop_away_step13_reward_value = _get_float_config_value(reward_configuration, "rg3_R_post_drop_away_step13_rwdfunc", 0.5)
-    post_drop_away_step45_reward_value = _get_float_config_value(reward_configuration, "rg3_R_post_drop_away_step45_rwdfunc", 1.0)
+    post_drop_away_step13_reward_value = 3
+    post_drop_away_step45_reward_value = 5
 
     post_drop_away_step13_mask = (
         has_dropped_after_lift_current
@@ -507,14 +542,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
     # ✅ NEW (REQUESTED):
     # drop 后前 K 步内累计 cube 3D 移动越少 => 一次性奖励越大
     # ======================================================================
-    POST_DROP_MOVE_REWARD_STEPS = max(
-        _get_int_config_value(
-            reward_configuration,
-            "rg3_post_drop_move_reward_steps_rwdfunc",
-            int(POST_DROP_CLOSE_RESET_STEPS),
-        ),
-        0,
-    )
+    POST_DROP_MOVE_REWARD_STEPS = 5
 
     post_drop_move_sum_previous = np.asarray(
         info.get("reach_grasp_transport_post_drop_move_sum_3d", np.zeros(number_of_environments, dtype=np.float32)),
@@ -532,6 +560,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
 
     in_post_drop_move_window = (
         has_dropped_after_lift_current
+        & (steps_since_drop_current >= 1)
         & (steps_since_drop_current <= int(POST_DROP_MOVE_REWARD_STEPS))
     ).astype(bool)
 
@@ -574,7 +603,7 @@ def _compute_reward_reach_grasp_transport(env, data, info):
         & (fingertip_center_to_box_distance <= float(POST_DROP_CLOSE_RESET_DIST))
     ).astype(bool)
 
-    # 第 K 步未触发 close-reset（距离 > 0.05）：给一次性 reward
+    # 第 K 步未触发 close-reset（距离 > 0.06）：给一次性 reward
     post_drop_far_reward = (
         float(POST_DROP_FAR_REWARD_VALUE)
         * (

@@ -91,7 +91,7 @@ def compute_target_progress_before_drop(
     ).astype(np.float32)
 
     # --- min-distance progress reward ---
-    target_progress_weight = _get_float_config_value(reward_configuration, "rg3_w_t3_rwdfunc", 10.0)
+    target_progress_weight = _get_float_config_value(reward_configuration, "rg3_w_t3_rwdfunc", 15.0)
     min_dist_weight = _get_float_config_value(reward_configuration, "rg3_w_t3_min_dist_rwdfunc", target_progress_weight)
 
     # ✅ 只保留 min-distance；step cap 用 min-dist 的 cap key
@@ -170,7 +170,7 @@ def compute_home_progress_after_drop(
     home_weight = _get_float_config_value(
         reward_configuration,
         "rg3_w_home_min_dist_rwdfunc",
-        _get_float_config_value(reward_configuration, "rg3_w_home_dist_rwdfunc", 8.0),
+        _get_float_config_value(reward_configuration, "rg3_w_home_dist_rwdfunc", 20.0),
     )
 
     home_step_cap = _get_float_config_value(
