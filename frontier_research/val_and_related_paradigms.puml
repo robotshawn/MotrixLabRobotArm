@@ -1,0 +1,79 @@
+@startuml
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam shadowing false
+
+title Frontier Research Landscape: VLA and Related Paradigms
+
+package "Foundational Learning Paradigms" {
+    [Deep Reinforcement Learning\n(DRL)]
+    [World Models]
+    [Large Language Models\n(LLM)]
+    [Multimodal Models\n(VLM / MLLM)]
+}
+
+package "Embodied Intelligence" {
+    [Embodied AI]
+}
+
+package "Action-Centric Models" {
+    [Vision-Language-Action Models\n(VLA)]
+}
+
+' ---- Core relationships ----
+
+[Deep Reinforcement Learning\n(DRL)] --> [World Models] : model-based RL
+[World Models] --> [Deep Reinforcement Learning\n(DRL)] : planning / imagination
+
+[Large Language Models\n(LLM)] --> [Multimodal Models\n(VLM / MLLM)] : vision grounding
+[Multimodal Models\n(VLM / MLLM)] --> [Large Language Models\n(LLM)] : semantic supervision
+
+[Multimodal Models\n(VLM / MLLM)] --> [Vision-Language-Action Models\n(VLA)] : perceptual & semantic backbone
+[Large Language Models\n(LLM)] --> [Vision-Language-Action Models\n(VLA)] : task & instruction grounding
+
+[Deep Reinforcement Learning\n(DRL)] --> [Vision-Language-Action Models\n(VLA)] : policy optimization / fine-tuning
+[World Models] --> [Vision-Language-Action Models\n(VLA)] : latent dynamics / rollout augmentation
+
+[Vision-Language-Action Models\n(VLA)] --> [Embodied AI] : language-grounded control
+[Embodied AI] --> [Vision-Language-Action Models\n(VLA)] : embodiment constraints
+
+' ---- Conceptual notes ----
+
+note right of [Vision-Language-Action Models\n(VLA)]
+VLA learns:
+p(action | vision, language, history)
+
+Language directly shapes
+the action distribution.
+end note
+
+note left of [World Models]
+World Models learn:
+p(next_state | state, action)
+
+Focus: physical dynamics
+end note
+
+note left of [Large Language Models\n(LLM)]
+LLMs learn:
+p(token | context)
+
+Focus: symbolic reasoning
+and compositionality
+end note
+
+note bottom of [Deep Reinforcement Learning\n(DRL)]
+DRL optimizes:
+Expected return
+
+Focus: control & exploration
+end note
+
+note right of [Multimodal Models\n(VLM / MLLM)]
+Multimodal Models learn:
+cross-modal alignment
+
+Focus: perception & semantics
+end note
+
+@enduml
